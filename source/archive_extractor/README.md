@@ -46,4 +46,4 @@ ZIP members are flattened into Unmanic's task cache rather than extracted to arc
 
 ## Current scope
 
-Version 0.1.0 intentionally selects the largest supported video in an archive. Archives containing multiple full-length videos are not split into multiple Unmanic tasks yet.
+Version 0.1.1 intentionally selects the largest supported video in an archive. Archives containing multiple full-length videos are not split into multiple Unmanic tasks yet.
