@@ -1,0 +1,9 @@
+{
+    "id": "archive_extractor",
+    "name": "Archive Extractor",
+    "author": "Kasun Indika",
+    "version": "0.1.0",
+    "tags": "archive,rar,zip,extract,worker,library",
+    "description": "Extract ZIP and RAR archives containing video files and pass the selected video through the Unmanic worker flow.",
+    "icon": ""
+}
