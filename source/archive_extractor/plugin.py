@@ -133,19 +133,18 @@ def _find_extracted_video(root, extensions):
     return candidates[0][1]
 
 
-def _set_task_state(task_data_store, key, value):
-    if task_data_store is not None:
-        task_data_store.set_task_state(STATE_PREFIX + key, value)
+def _settings_for(data):
+    library_id = data.get("library_id")
+    return Settings(library_id=library_id) if library_id else Settings()
 
 
-def _get_task_state(task_data_store, key, default=None):
-    if task_data_store is None:
-        return default
-    return task_data_store.get_task_state(STATE_PREFIX + key, default)
+def _source_archive_path(data):
+    source_data = data.get("source_data") or {}
+    return source_data.get("abspath") or data.get("original_file_path") or data.get("file_in") or ""
 
 
 def on_library_management_file_test(data):
-    settings = Settings()
+    settings = _settings_for(data)
     path = data.get("path", "")
 
     if _archive_kind(path, settings) and _is_primary_archive(path):
@@ -154,8 +153,8 @@ def on_library_management_file_test(data):
     return data
 
 
-def on_worker_process(data, task_data_store=None):
-    settings = Settings()
+def on_worker_process(data):
+    settings = _settings_for(data)
     source = data.get("file_in") or ""
     original = data.get("original_file_path") or source
     kind = _archive_kind(original, settings)
@@ -186,9 +185,6 @@ def on_worker_process(data, task_data_store=None):
 
                 data["file_in"] = destination
                 data["file_out"] = destination
-                _set_task_state(task_data_store, "output_basename", basename)
-                _set_task_state(task_data_store, "archive_path", original)
-                _set_task_state(task_data_store, "archive_kind", "zip")
                 _log(data, "Selected video: {}".format(basename))
                 return data
         except Exception as exc:
@@ -196,23 +192,18 @@ def on_worker_process(data, task_data_store=None):
             raise
 
     # RAR extraction requires an extractor available in the Unmanic runtime.
-    extraction_dir = _get_task_state(task_data_store, "rar_extraction_dir")
-    extraction_started = _get_task_state(task_data_store, "rar_extraction_started", False)
+    base_cache_dir = os.path.dirname(os.path.abspath(data["file_out"]))
+    extraction_dir = os.path.join(base_cache_dir, "archive_extractor")
 
-    if extraction_started:
-        selected = _find_extracted_video(extraction_dir, extensions)
-        if not selected:
-            raise RuntimeError(
-                "RAR extraction completed but no supported video file was found in '{}'.".format(extraction_dir)
-            )
-
+    # The worker hook is repeated after the extraction command completes.
+    # Use the deterministic extraction directory itself as state so this works
+    # with the official Unmanic hook API (which passes only the data dict).
+    selected = _find_extracted_video(extraction_dir, extensions)
+    if selected:
         basename = os.path.basename(selected)
         data["file_in"] = selected
         data["file_out"] = selected
         data["repeat"] = False
-        _set_task_state(task_data_store, "output_basename", basename)
-        _set_task_state(task_data_store, "archive_path", original)
-        _set_task_state(task_data_store, "archive_kind", "rar")
         _log(data, "Selected extracted video: {}".format(basename))
         return data
 
@@ -222,8 +213,6 @@ def on_worker_process(data, task_data_store=None):
             "RAR support requires '7z', '7zz', or 'unrar' inside the Unmanic container/runtime."
         )
 
-    base_cache_dir = os.path.dirname(os.path.abspath(data["file_out"]))
-    extraction_dir = os.path.join(base_cache_dir, "archive_extractor")
     os.makedirs(extraction_dir, exist_ok=True)
 
     exe_name = os.path.basename(extractor).lower()
@@ -231,9 +220,6 @@ def on_worker_process(data, task_data_store=None):
         command = [extractor, "x", "-y", "-o{}".format(extraction_dir), original]
     else:
         command = [extractor, "x", "-o+", original, extraction_dir + os.sep]
-
-    _set_task_state(task_data_store, "rar_extraction_dir", extraction_dir)
-    _set_task_state(task_data_store, "rar_extraction_started", True)
 
     data["exec_command"] = command
     data["file_out"] = None
@@ -243,23 +229,20 @@ def on_worker_process(data, task_data_store=None):
     return data
 
 
-def on_postprocessor_file_movement(data, task_data_store=None):
+def on_postprocessor_file_movement(data):
     """
     Put the processed media beside the archive, using the selected archive
     member's filename rather than overwriting the .zip/.rar source.
     """
-    basename = _get_task_state(task_data_store, "output_basename")
-    archive_path = _get_task_state(task_data_store, "archive_path")
+    archive_path = _source_archive_path(data)
+    processed_file = data.get("file_in") or ""
 
-    if not basename or not archive_path:
+    if not archive_path or not processed_file:
         return data
 
-    destination = os.path.join(os.path.dirname(archive_path), basename)
-
-    # If a later worker plugin changed the extension, preserve that extension.
-    processed_ext = os.path.splitext(data.get("file_in") or "")[1]
-    if processed_ext:
-        destination = os.path.splitext(destination)[0] + processed_ext
+    # Preserve the final worker output name/extension and place it beside the
+    # original archive rather than trying to overwrite the archive itself.
+    destination = os.path.join(os.path.dirname(archive_path), os.path.basename(processed_file))
 
     data["copy_file"] = True
     data["file_out"] = destination
@@ -297,10 +280,10 @@ def _rar_related_parts(primary_path):
     return [primary_path]
 
 
-def on_postprocessor_task_results(data, task_data_store=None):
-    settings = Settings()
-    archive_path = _get_task_state(task_data_store, "archive_path")
-    archive_kind = _get_task_state(task_data_store, "archive_kind")
+def on_postprocessor_task_results(data):
+    settings = _settings_for(data)
+    archive_path = _source_archive_path(data)
+    archive_kind = _archive_kind(archive_path, settings)
 
     if not archive_path:
         return data
