@@ -12,13 +12,13 @@ worker flow, and place the final processed media beside the source archive.
 import os
 import re
 import shutil
+import subprocess
 import zipfile
 
 from unmanic.libs.unplugins.settings import PluginSettings
 
 
 PLUGIN_ID = "archive_extractor"
-STATE_PREFIX = "archive_extractor."
 PART_RAR_RE = re.compile(r"(?i)\.part(\d+)\.rar$")
 RXX_RE = re.compile(r"(?i)\.r(\d\d)$")
 
@@ -162,7 +162,6 @@ def on_worker_process(data):
     # For non-archive inputs this plugin is a no-op, allowing normal media tasks
     # to continue through the rest of the configured worker flow.
     if not kind:
-        data["file_out"] = None
         return data
 
     extensions = _video_extensions(settings)
@@ -192,27 +191,14 @@ def on_worker_process(data):
             raise
 
     # RAR extraction requires an extractor available in the Unmanic runtime.
-    base_cache_dir = os.path.dirname(os.path.abspath(data["file_out"]))
-    extraction_dir = os.path.join(base_cache_dir, "archive_extractor")
-
-    # The worker hook is repeated after the extraction command completes.
-    # Use the deterministic extraction directory itself as state so this works
-    # with the official Unmanic hook API (which passes only the data dict).
-    selected = _find_extracted_video(extraction_dir, extensions)
-    if selected:
-        basename = os.path.basename(selected)
-        data["file_in"] = selected
-        data["file_out"] = selected
-        data["repeat"] = False
-        _log(data, "Selected extracted video: {}".format(basename))
-        return data
-
     extractor = shutil.which("7z") or shutil.which("7zz") or shutil.which("unrar")
     if not extractor:
         raise RuntimeError(
             "RAR support requires '7z', '7zz', or 'unrar' inside the Unmanic container/runtime."
         )
 
+    base_cache_dir = os.path.dirname(os.path.abspath(data["file_out"]))
+    extraction_dir = os.path.join(base_cache_dir, "archive_extractor")
     os.makedirs(extraction_dir, exist_ok=True)
 
     exe_name = os.path.basename(extractor).lower()
@@ -221,13 +207,34 @@ def on_worker_process(data):
     else:
         command = [extractor, "x", "-o+", original, extraction_dir + os.sep]
 
-    data["exec_command"] = command
-    data["file_out"] = None
-    data["repeat"] = True
-    data.setdefault("current_command", []).append("Extracting RAR archive")
     _log(data, "Using '{}' to extract RAR archive.".format(exe_name))
-    return data
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        universal_newlines=True,
+        errors="replace",
+    )
+    if result.returncode != 0:
+        output = (result.stdout or "").strip()
+        raise RuntimeError(
+            "RAR extraction failed with exit code {}{}.".format(
+                result.returncode,
+                ": " + output[-1000:] if output else "",
+            )
+        )
 
+    selected = _find_extracted_video(extraction_dir, extensions)
+    if not selected:
+        raise RuntimeError(
+            "RAR extraction completed but no supported video file was found in '{}'.".format(extraction_dir)
+        )
+
+    basename = os.path.basename(selected)
+    data["file_in"] = selected
+    data["file_out"] = selected
+    _log(data, "Selected extracted video: {}".format(basename))
+    return data
 
 def on_postprocessor_file_movement(data):
     """
